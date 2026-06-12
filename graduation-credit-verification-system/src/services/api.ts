@@ -157,7 +157,6 @@ export const graduationService = {
     let completedGeneral = 0;
     let completedPe = 0;
     let completedEnglish = 0;
-    let englishPassed = false;
 
     records.forEach((r: any) => {
       if (!r.is_passed) return;
@@ -174,33 +173,25 @@ export const graduationService = {
       }
     });
 
-    // Note 4: 應修通識畢業學分總數為 28 學分，超過之學分數不得採計為畢業學分
-    // Total graduation credits = Required + Elective + min(General + English, 28)
-    const effectiveGE = Math.min(completedGeneral + completedEnglish, 28);
-    const totalCompleted = completedRequired + completedElective + effectiveGE;
-    const totalRequired = 128;
+    const summary = creditCheck.credit_summary || {};
+    const totalRequired = summary.total_target ?? 128;
+    const totalCompleted = summary.total_credits ?? Math.min(completedGeneral + completedEnglish, 28) + completedRequired + completedElective;
 
-    const requiredRules = (creditCheck.results || []).filter((res: any) => [1, 2].includes(res.category_id));
-    const requiredTarget = requiredRules.reduce(
-      (sum: number, res: any) => sum + (res.required_credits ?? 0),
-      0
-    ) || 51;
-    const requiredCompleted = requiredRules.reduce((sum: number, res: any) => {
-      const earnedCredits = res.earned_credits ?? 0;
-      const requiredCredits = res.required_credits;
-      return sum + (requiredCredits != null ? Math.min(earnedCredits, requiredCredits) : earnedCredits);
-    }, 0) || completedRequired;
-
-    const englishTarget = 6;
-    const generalTarget = 28; // 28 total GE, which includes English
-    const electiveRule = creditCheck.results?.find((res: any) => res.category_id === 5);
-    const electiveTarget = electiveRule?.required_credits ?? 49;
+    const requiredTarget = summary.required_target ?? 51;
+    const requiredCompleted = summary.required_credits ?? completedRequired;
+    const englishRule = creditCheck.results?.find((res: any) => res.category_id === 15);
+    const englishTarget = englishRule?.required_credits ?? 6;
+    const englishPassed = Boolean(englishRule?.is_passed);
+    const generalTarget = summary.general_education_target ?? 28;
+    const electiveTarget = summary.elective_target ?? 49;
+    const electiveCompleted = summary.elective_credits ?? completedElective;
+    const generalCompleted = summary.general_education_credits ?? Math.min(completedGeneral + completedEnglish, 28);
     let peTarget = 4;
 
     const categoryProgress = {
       required: { completed: requiredCompleted, target: requiredTarget },
-      elective: { completed: completedElective, target: electiveTarget },
-      general: { completed: Math.min(completedGeneral + completedEnglish, 28), target: generalTarget },
+      elective: { completed: electiveCompleted, target: electiveTarget },
+      general: { completed: generalCompleted, target: generalTarget },
       pe: { completed: completedPe, target: peTarget },
       english: { completed: englishPassed, target: englishTarget }
     };
@@ -343,30 +334,18 @@ export const graduationService = {
 
     // 2. Dynamic Rules from Backend
     if (creditCheck.results) {
-      let hasCoreGe = false;
-      let coreGePassed = true;
-
       creditCheck.results.forEach((res: any, idx: number) => {
         let name = res.sub_type ? `${res.main_type} - ${res.sub_type}` : res.main_type;
         let mainType = res.main_type;
-        const typeLabel = name.toLowerCase();
 
         if (res.category_id === 5) {
             mainType = "專業選修";
             name = "專業選修學分門檻";
         }
 
-        // Group B~E Reclassification
-        if (typeLabel.includes('群b') || typeLabel.includes('群c') || typeLabel.includes('群d') || typeLabel.includes('群e')) {
+        if (mainType === '群修') {
             mainType = "系選修";
             name = `系選修 - ${res.sub_type}`;
-        }
-
-        // Core GE Consolidation
-        if (typeLabel.includes('核心通識')) {
-            hasCoreGe = true;
-            if (!res.is_passed) coreGePassed = false;
-            return;
         }
 
         let requiredStr = "";
@@ -374,7 +353,14 @@ export const graduationService = {
         let progress = 0;
         let details = "";
 
-        if (res.required_credits !== null) {
+        if (res.required_credits !== null && res.required_courses !== null) {
+           requiredStr = `>= ${res.required_courses} 門 / ${res.required_credits} 學分`;
+           completedStr = `${res.passed_courses} 門 / ${res.earned_credits} 學分`;
+           const courseProgress = res.required_courses === 0 ? 100 : Math.round((res.passed_courses / res.required_courses) * 100);
+           const creditProgress = res.required_credits === 0 ? 100 : Math.round((res.earned_credits / res.required_credits) * 100);
+           progress = Math.min(100, Math.min(courseProgress, creditProgress)) || 0;
+           details = res.is_passed ? "門數與學分皆達標" : `缺 ${res.missing_courses_count ?? 0} 門 / ${res.missing_credits ?? 0} 學分`;
+        } else if (res.required_credits !== null) {
            requiredStr = `>= ${res.required_credits} 學分`;
            completedStr = `${res.earned_credits} 學分`;
            progress = res.required_credits === 0 ? 100 : Math.min(100, Math.round((res.earned_credits / res.required_credits) * 100)) || 0;
@@ -397,36 +383,7 @@ export const graduationService = {
           details: details
         });
       });
-
-      if (hasCoreGe) {
-          rules.push({
-              id: "core_ge_consolidated",
-              name: "核心通識 (人文/社會/自然)",
-              type: "通識",
-              required: "至少 2 門不同領域",
-              completed: coreGePassed ? "已達標" : "未達標",
-              progress: coreGePassed ? 100 : 50,
-              status: coreGePassed ? "completed" : "failed",
-              details: coreGePassed ? "已滿足跨領域核心通識規定" : "缺少不同領域的核心通識"
-          });
-      }
     }
-
-    // 3. Minimum Total Credits Rule
-    const totalRequired = dashboard.totalRequiredCredits || 128;
-    const totalCompleted = dashboard.totalCompletedCredits;
-    rules.push({
-      id: "r_total",
-      name: "最低畢業總學分",
-      type: "Total Credits",
-      required: `>= ${totalRequired} 學分`,
-      completed: `${totalCompleted} 學分`,
-      progress: Math.min(100, Math.round((totalCompleted / totalRequired) * 100)),
-      status: totalCompleted >= totalRequired ? "completed" : (totalCompleted >= (totalRequired * 0.78) ? "warning" : "failed"),
-      details: totalCompleted >= totalRequired
-        ? `已取得 ${totalCompleted} 學分，已達最低門檻`
-        : `已取得 ${totalCompleted} 學分，尚缺 ${Math.max(0, totalRequired - totalCompleted)} 學分`
-    });
 
     return rules;
   },
