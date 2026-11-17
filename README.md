@@ -62,3 +62,4 @@ npm run dev
 
 ## 👥 開發團隊
 本專案為政大資料庫系統課程 (DBMS) 期末專案。
+https://www.canva.com/design/DAHMRp9ELqY/171FP3_Pngv2WYjwa692_w/edit
